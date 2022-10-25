@@ -1,0 +1,160 @@
+---
+title: "HPC rrBLUP script"
+author: "Joseph Oddy"
+date: '2022-06-14'
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+Load rrBLUP and dplyr packages.
+
+```{r}
+library(rrBLUP)
+library(dplyr)
+```
+
+Load genotype and phenotype files and impute missing markers.
+
+```{r}
+# import geno and pheno files
+H18.geno <- as.matrix(read.csv(file = "RXC_rrBLUP_genotypes.csv", header = TRUE))
+rownames(H18.geno) <- H18.geno[,1]
+H18.geno <- H18.geno[,-1]
+
+H18.pheno <- as.matrix(read.csv(file = "220124 H18 data.csv", header = TRUE))
+rownames(H18.pheno) <- H18.pheno[,1]
+H18.pheno <- H18.pheno[,-1]
+
+H19.pheno <- as.matrix(read.csv(file = "220124 H19 data.csv", header = TRUE))
+rownames(H19.pheno) <- H19.pheno[,1]
+H19.pheno <- H19.pheno[,-1]
+
+# impute missing markers
+impute <- A.mat(H18.geno,max.missing = 0.5,impute.method="mean",return.imputed=T)
+Markers_impute <- impute$imputed
+```
+
+Create function for estimating marker effects with five-fold cross validation.
+
+```{r}
+# creat empty matrix for results
+res<-matrix(NA,5,2)
+
+### function for getting testing and training sets
+fivefoldcv <- function(geno, pheno, ...){
+  
+  for (i in 1:5){
+  # create vector to assign rows to 5 different groups
+  linegrouping <-  sample(rep(1:5, length.out = 171))
+  linegrouping <- factor(linegrouping)
+  assigngroups <- data.frame(rownames(geno), linegrouping)
+  test <- assigngroups[which(linegrouping == i),]
+  test <- test[,1]
+  train <- subset(assigngroups, linegrouping != i)
+  train <- train[,1]
+  
+  # get pheno and geno data for the training and testing
+  pheno_train <- pheno[train,]
+  geno_train <- Markers_impute[train,]
+  pheno_test <- pheno[test,]
+  geno_test <- Markers_impute[test,]
+  trait <- pheno_train
+  traitname <- colnames(pheno)
+
+  # calculate marker effects
+  mxslv <- mixed.solve(trait, Z = geno_train, K = NULL, SE = FALSE, return.Hinv=FALSE)
+  TPr <- mxslv$u
+  effects <- as.matrix(TPr)
+  pred_test <- geno_test %*% effects
+  predictions <- (pred_test[,1]) + mxslv$beta
+  
+  # calculate correlation between test predictions and validation set
+  validation <- pheno_test
+  accuracy <- cor(predictions, validation, use = "complete")
+  
+  # Store the results
+  res[i,1] <- accuracy
+  res[i,2] <- traitname
+  
+  }
+  return(data.frame(res))
+}
+```
+
+Create and run functions for looping the "fivefoldcv" function over the columns of both H18 and H19 datasets. Code for running within year prediction estimates is shown here.
+
+```{r}
+#### new function for looping over columns H18
+
+list1 <- list()
+traitlooping <- function(geno, pheno, ...){
+  for (i in 1:ncol(H18.pheno)){
+    pheno <- H18.pheno[,i, drop = FALSE]
+    list1[[i]] <- fivefoldcv(geno, pheno)
+  }
+  return(list1)
+}
+
+### repeat 10000 times H18
+list2 <- list()
+suppressWarnings(for (i in 1:10000){
+  H18 <- traitlooping(H18.geno, H18.pheno)
+  list2[[i]] <- H18
+})
+
+#### new function for looping over columns H19
+
+list3 <- list()
+traitlooping2 <- function(geno, pheno, ...){
+  for (i in 1:ncol(H19.pheno)){
+    pheno <- H19.pheno[,i, drop = FALSE]
+    list3[[i]] <- fivefoldcv(geno, pheno)
+  }
+  return(list3)
+}
+
+### repeat 10000 times H19
+list4 <- list()
+suppressWarnings(for (i in 1:10000){
+  H19 <- traitlooping2(H18.geno, H19.pheno)
+  list4[[i]] <- H19
+})
+```
+
+Create and run function for formatting the output.
+
+```{r}
+### function for formatting genomic prediction output
+formatting <- function(gpdata){
+  
+  # unlist
+  unlisted <- unlist(gpdata, recursive = FALSE)
+  
+  # bind results into dataframe and order
+  genpredicted <- do.call(rbind.data.frame, unlisted)
+  genpredicted <- genpredicted[order(genpredicted$X2),]
+  
+  # calculate means over permutations
+  genpredicted$X1 <- as.numeric(genpredicted$X1)
+  genpredicted$X2 <- as.factor(genpredicted$X2)
+  names(genpredicted)[1] <- "Correlation"
+  names(genpredicted)[2] <- "Trait"
+  genmeans <- aggregate(genpredicted$Correlation~genpredicted$Trait, FUN=mean)
+  names(genmeans)[1] <- "Trait"
+  names(genmeans)[2] <- "Correlation"
+  genmeans <- genmeans[order(-genmeans$Correlation),]
+  
+  return(list(genpredicted, genmeans))
+}
+
+### formatting
+H18.summary <- formatting(list2)
+
+H19.summary <- formatting(list4)
+
+write.csv(H18.summary[[1]], file = "H18 summary")
+write.csv(H19.summary[[1]], file = "H19 summary")
+```
+
